@@ -37,6 +37,23 @@ resource "aws_iam_instance_profile" "ec2_profile" {
 # EC2 INSTANCES
 # =============================================================================
 
+# Backend EC2 Instance  
+# Runs FastAPI application in private subnet
+resource "aws_instance" "backend" {
+  ami           = data.aws_ami.amazon_linux_2023.id
+  instance_type = "t3.small"
+  subnet_id     = aws_subnet.private.id
+  
+  vpc_security_group_ids = [aws_security_group.backend.id]
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+  
+  user_data = base64encode(file("${path.module}/user-data/backend.sh"))
+
+  tags = {
+    Name = "image-editor-backend"
+  }
+}
+
 # Frontend EC2 Instance
 # Runs Next.js application in private subnet
 resource "aws_instance" "frontend" {
@@ -58,30 +75,49 @@ resource "aws_instance" "frontend" {
   }
 }
 
-# Backend EC2 Instance  
-# Runs FastAPI application in private subnet
-resource "aws_instance" "backend" {
-  ami           = data.aws_ami.amazon_linux_2023.id
-  instance_type = "t3.small"
-  subnet_id     = aws_subnet.private.id
-  
-  vpc_security_group_ids = [aws_security_group.backend.id]
-  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
-  
-  user_data = base64encode(file("${path.module}/user-data/backend.sh"))
+# =============================================================================
+# APPLICATION LOAD BALANCER
+# =============================================================================
+
+# Application Load Balancer
+resource "aws_lb" "main" {
+  name               = "image-editor-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.alb.id]
+  subnets            = aws_subnet.public[*].id
 
   tags = {
-    Name = "image-editor-backend"
+    Name = "image-editor-alb"
   }
 }
 
-# =============================================================================
-# TARGET GROUP ATTACHMENT
-# =============================================================================
+# Target Group for Frontend
+resource "aws_lb_target_group" "frontend" {
+  name     = "image-editor-frontend-tg"
+  port     = 3000
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.main.id
 
-# Register Frontend Instance with ALB
+  tags = {
+    Name = "image-editor-frontend-tg"
+  }
+}
+
+# HTTP Listener
+resource "aws_lb_listener" "http" {
+  load_balancer_arn = aws_lb.main.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.frontend.arn
+  }
+}
+
+# Target Group Attachment
 resource "aws_lb_target_group_attachment" "frontend" {
   target_group_arn = aws_lb_target_group.frontend.arn
   target_id        = aws_instance.frontend.id
-  port             = 3000
 }

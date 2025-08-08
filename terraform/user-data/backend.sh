@@ -11,7 +11,7 @@ yum install -y gcc python3-devel libjpeg-devel zlib-devel
 
 # Clone the application
 cd /home/ec2-user
-git clone https://github.com/your-repo/image-editor.git app
+git clone https://github.com/datafruit-dev/image-editor.git app
 cd app/backend
 
 # Create virtual environment

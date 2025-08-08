@@ -9,7 +9,7 @@ yum install -y nodejs git
 
 # Clone the application
 cd /home/ec2-user
-git clone https://github.com/your-repo/image-editor.git app
+git clone https://github.com/datafruit-dev/image-editor.git app
 cd app/frontend
 
 # Set backend URL from Terraform template variable (needed at build time)
