@@ -324,6 +324,33 @@ resource "aws_vpc_security_group_egress_rule" "backend_http_out" {
 }
 
 # =============================================================================
+# INTERNAL DNS WITH ROUTE53 PRIVATE HOSTED ZONE
+# =============================================================================
+
+# Private hosted zone for internal service discovery
+resource "aws_route53_zone" "internal" {
+  name = "internal.local"
+
+  vpc {
+    vpc_id = aws_vpc.main.id
+  }
+
+  tags = {
+    Name = "image-editor-internal-dns"
+  }
+}
+
+# DNS record for backend service
+resource "aws_route53_record" "backend" {
+  zone_id = aws_route53_zone.internal.zone_id
+  name    = "backend.internal.local"
+  type    = "A"
+  ttl     = 300
+  records = [aws_instance.backend.private_ip]
+}
+
+
+# =============================================================================
 # OPTIONAL: SSH ACCESS (for debugging - remove in production)
 # =============================================================================
 

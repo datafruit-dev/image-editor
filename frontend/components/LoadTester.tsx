@@ -18,7 +18,7 @@ export default function LoadTester() {
 
     try {
       const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/api/load-test`,
+        '/api/load-test',
         {
           method: 'POST',
           headers: {
@@ -54,7 +54,7 @@ export default function LoadTester() {
   const stopLoadTest = async () => {
     try {
       await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/api/load-test/stop`,
+        '/api/load-test/stop',
         { method: 'POST' }
       );
       setStatus('Load test stopped');

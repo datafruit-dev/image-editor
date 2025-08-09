@@ -33,7 +33,7 @@ export default function MetricsDashboard() {
   useEffect(() => {
     const fetchMetrics = async () => {
       try {
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080'}/api/metrics`);
+        const response = await fetch('/api/metrics');
         if (response.ok) {
           const data = await response.json();
           setMetrics(data);

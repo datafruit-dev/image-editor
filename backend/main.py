@@ -1,6 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import base64
 import io
@@ -16,14 +15,6 @@ import threading
 import random
 
 app = FastAPI(title="Image Processing Service")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 class MetricsTracker:
     def __init__(self):

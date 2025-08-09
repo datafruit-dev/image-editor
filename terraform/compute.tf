@@ -47,6 +47,11 @@ resource "aws_instance" "backend" {
   vpc_security_group_ids = [aws_security_group.backend.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
   
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 20
+  }
+  
   user_data = base64encode(file("${path.module}/user-data/backend.sh"))
 
   tags = {
@@ -64,9 +69,12 @@ resource "aws_instance" "frontend" {
   vpc_security_group_ids = [aws_security_group.frontend.id]
   iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
   
-  user_data = base64encode(templatefile("${path.module}/user-data/frontend.sh", {
-    backend_private_ip = aws_instance.backend.private_ip
-  }))
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = 20
+  }
+  
+  user_data = base64encode(file("${path.module}/user-data/frontend.sh"))
   
   depends_on = [aws_instance.backend]
 

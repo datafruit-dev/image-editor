@@ -12,8 +12,8 @@ cd /home/ec2-user
 git clone https://github.com/datafruit-dev/image-editor.git app
 cd app/frontend
 
-# Set backend URL from Terraform template variable (needed at build time)
-echo "NEXT_PUBLIC_API_URL=http://${backend_private_ip}:8080" > .env.local
+# Set backend URL to use internal DNS (for server-side API routes)
+echo "BACKEND_URL=http://backend.internal.local:8080" > .env.local
 
 # Install dependencies
 npm install
