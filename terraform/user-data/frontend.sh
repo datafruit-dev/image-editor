@@ -13,7 +13,7 @@ git clone https://github.com/datafruit-dev/image-editor.git app
 cd app/frontend
 
 # Set backend URL to use internal DNS (for server-side API routes)
-echo "BACKEND_URL=http://backend.internal.local:8080" > .env.local
+echo "BACKEND_URL=http://${backend_hostname}:8080" > .env.local
 
 # Install dependencies
 npm install

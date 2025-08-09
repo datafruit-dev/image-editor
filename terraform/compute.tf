@@ -74,7 +74,9 @@ resource "aws_instance" "frontend" {
     volume_size = 20
   }
   
-  user_data = base64encode(file("${path.module}/user-data/frontend.sh"))
+  user_data = base64encode(templatefile("${path.module}/user-data/frontend.sh", {
+    backend_hostname = local.backend_hostname
+  }))
   
   depends_on = [aws_instance.backend]
 

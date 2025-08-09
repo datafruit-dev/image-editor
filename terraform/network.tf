@@ -1,4 +1,13 @@
 # =============================================================================
+# LOCAL VARIABLES
+# =============================================================================
+
+locals {
+  internal_domain  = "internal.local"
+  backend_hostname = "backend.${local.internal_domain}"
+}
+
+# =============================================================================
 # NETWORKING - VPC
 # =============================================================================
 
@@ -329,7 +338,7 @@ resource "aws_vpc_security_group_egress_rule" "backend_http_out" {
 
 # Private hosted zone for internal service discovery
 resource "aws_route53_zone" "internal" {
-  name = "internal.local"
+  name = local.internal_domain
 
   vpc {
     vpc_id = aws_vpc.main.id
@@ -343,7 +352,7 @@ resource "aws_route53_zone" "internal" {
 # DNS record for backend service
 resource "aws_route53_record" "backend" {
   zone_id = aws_route53_zone.internal.zone_id
-  name    = "backend.internal.local"
+  name    = local.backend_hostname
   type    = "A"
   ttl     = 300
   records = [aws_instance.backend.private_ip]
