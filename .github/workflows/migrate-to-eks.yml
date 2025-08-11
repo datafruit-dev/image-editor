@@ -1,0 +1,242 @@
+name: Migrate from EC2 to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration_step:
+        description: 'Migration step to perform'
+        required: true
+        default: 'validate'
+        type: choice
+        options:
+          - validate      # Check current EC2 setup
+          - deploy-eks    # Deploy EKS infrastructure
+          - test-eks      # Test EKS deployment
+          - switch-traffic # Switch traffic to EKS
+          - cleanup-ec2   # Remove EC2 resources
+
+env:
+  AWS_REGION: us-east-1
+  EKS_CLUSTER_NAME: image-editor-cluster
+  NAMESPACE: image-editor
+
+jobs:
+  validate-current:
+    name: Validate Current EC2 Setup
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.event.inputs.migration_step == 'validate' }}
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Check EC2 Instances
+      run: |
+        echo "🔍 Checking current EC2 infrastructure..."
+        
+        # Check backend instances
+        echo "Backend instances:"
+        aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-backend*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].[InstanceId,State.Name,PrivateIpAddress]" \
+          --output table
+        
+        # Check frontend instances
+        echo -e "\nFrontend instances:"
+        aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-frontend*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].[InstanceId,State.Name,PrivateIpAddress]" \
+          --output table
+        
+        # Check ALB
+        echo -e "\nLoad Balancers:"
+        aws elbv2 describe-load-balancers \
+          --names image-editor-alb 2>/dev/null || echo "ALB not found"
+        
+        # Check ECR repositories
+        echo -e "\nECR Repositories:"
+        aws ecr describe-repositories \
+          --repository-names image-editor-backend image-editor-frontend \
+          --query "repositories[].repositoryUri" \
+          --output table 2>/dev/null || echo "Repositories not found"
+        
+        echo "✅ Current infrastructure validated"
+
+  deploy-eks-infrastructure:
+    name: Deploy EKS Infrastructure
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.event.inputs.migration_step == 'deploy-eks' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Deploy EKS with Terraform
+      run: |
+        echo "🚀 Deploying EKS infrastructure..."
+        echo "Note: This will create EKS alongside existing EC2 instances"
+        echo "Traffic will continue to flow through existing ALB to EC2"
+        
+        # This would trigger the setup-eks workflow
+        echo "Please run the 'Setup EKS Infrastructure' workflow with action='setup'"
+        echo "Or manually apply Terraform with the compute-eks.tf configuration"
+
+  test-eks-deployment:
+    name: Test EKS Deployment
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.event.inputs.migration_step == 'test-eks' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Deploy to EKS (Parallel Testing)
+      run: |
+        echo "🧪 Deploying application to EKS for testing..."
+        echo "This creates a separate ALB for testing without affecting production"
+        
+        # Deploy the application
+        kubectl apply -f terraform-demo/k8s-manifests/namespace.yaml
+        kubectl apply -f terraform-demo/k8s-manifests/backend-deployment.yaml
+        kubectl apply -f terraform-demo/k8s-manifests/frontend-deployment.yaml
+        kubectl apply -f terraform-demo/k8s-manifests/ingress.yaml
+        
+        # Wait for deployments
+        kubectl rollout status deployment/image-editor-backend -n ${{ env.NAMESPACE }} --timeout=300s
+        kubectl rollout status deployment/image-editor-frontend -n ${{ env.NAMESPACE }} --timeout=300s
+        
+        echo "⏳ Waiting for ALB to be provisioned..."
+        sleep 60
+        
+        # Get the test ALB URL
+        TEST_ALB_URL=$(kubectl get ingress -n ${{ env.NAMESPACE }} image-editor-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        if [ -n "$TEST_ALB_URL" ]; then
+          echo "✅ Test environment ready at: http://$TEST_ALB_URL"
+          echo "You can now test the EKS deployment while production traffic continues to EC2"
+          
+          # Run basic health checks
+          echo -e "\n🧪 Running health checks..."
+          curl -f http://$TEST_ALB_URL/ || echo "Frontend check failed"
+          curl -f http://$TEST_ALB_URL/api/health || echo "Backend check failed"
+        else
+          echo "⚠️ ALB not ready yet. Check manually with:"
+          echo "kubectl get ingress -n ${{ env.NAMESPACE }}"
+        fi
+
+  switch-traffic:
+    name: Switch Traffic to EKS
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.event.inputs.migration_step == 'switch-traffic' }}
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Traffic Switch Plan
+      run: |
+        echo "📋 Traffic Switch Plan:"
+        echo "========================"
+        echo "This step would typically involve:"
+        echo "1. Update Route53/DNS to point to new EKS ALB"
+        echo "2. Or update existing ALB target groups to EKS nodes"
+        echo "3. Monitor traffic and errors"
+        echo "4. Keep EC2 instances running for quick rollback"
+        echo ""
+        echo "⚠️ Manual Steps Required:"
+        echo "1. Get the new ALB URL from EKS ingress"
+        echo "2. Update DNS records or load balancer configuration"
+        echo "3. Monitor application metrics and logs"
+        echo ""
+        echo "To get the EKS ALB URL, run:"
+        echo "kubectl get ingress -n image-editor image-editor-ingress"
+
+  cleanup-ec2:
+    name: Cleanup EC2 Resources
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: ${{ github.event.inputs.migration_step == 'cleanup-ec2' }}
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Cleanup Plan
+      run: |
+        echo "🗑️ EC2 Cleanup Plan:"
+        echo "===================="
+        echo "⚠️ WARNING: This will remove EC2 resources after confirming EKS is stable"
+        echo ""
+        echo "Resources to be removed:"
+        echo "1. EC2 instances (backend and frontend)"
+        echo "2. Old ALB and target groups"
+        echo "3. Associated security group rules"
+        echo "4. Route53 records pointing to EC2"
+        echo ""
+        echo "Before proceeding:"
+        echo "✅ Ensure EKS has been running stable for at least 24 hours"
+        echo "✅ All traffic is successfully routed through EKS"
+        echo "✅ Monitoring shows no issues"
+        echo "✅ You have a backup plan"
+        echo ""
+        echo "To remove EC2 resources:"
+        echo "1. Remove compute.tf references from Terraform"
+        echo "2. Run: terraform plan"
+        echo "3. Review changes carefully"
+        echo "4. Run: terraform apply"
+        echo ""
+        echo "Or terminate instances manually via AWS Console"
+
+  migration-summary:
+    name: Migration Summary
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: always()
+    
+    steps:
+    - name: Summary
+      run: |
+        echo "📊 Migration Step: ${{ github.event.inputs.migration_step }}"
+        echo ""
+        echo "🔄 Migration Process:"
+        echo "1. ✅ Validate - Check current EC2 setup"
+        echo "2. 🚀 Deploy EKS - Create EKS infrastructure (parallel to EC2)"
+        echo "3. 🧪 Test EKS - Deploy and test on EKS (separate ALB)"
+        echo "4. 🔀 Switch Traffic - Route production traffic to EKS"
+        echo "5. 🗑️ Cleanup EC2 - Remove old EC2 resources"
+        echo ""
+        echo "📝 Notes:"
+        echo "- Each step can be run independently"
+        echo "- EC2 and EKS can run in parallel during migration"
+        echo "- Always test thoroughly before switching production traffic"
+        echo "- Keep EC2 running for quick rollback if needed"
