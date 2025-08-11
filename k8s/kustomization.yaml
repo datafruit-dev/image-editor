@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: image-editor
+
+resources:
+  - namespace.yaml
+  - backend-deployment.yaml
+  - frontend-deployment.yaml
+  - ingress.yaml
+  - hpa.yaml
+
+images:
+  - name: 642375200181.dkr.ecr.us-east-1.amazonaws.com/image-editor-backend
+    newTag: latest
+  - name: 642375200181.dkr.ecr.us-east-1.amazonaws.com/image-editor-frontend
+    newTag: latest
+
+commonLabels:
+  environment: production
+  managed-by: kustomize
