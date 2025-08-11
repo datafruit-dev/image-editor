@@ -1,4 +1,4 @@
-name: Deploy to ECR
+name: Deploy to ECR and EC2
 
 on:
   push:
@@ -11,7 +11,7 @@ env:
 
 jobs:
   deploy:
-    name: Deploy to ECR
+    name: Deploy to ECR and EC2
     runs-on: ubuntu-latest
 
     steps:
@@ -52,3 +52,116 @@ jobs:
         docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+
+    # Deploy to EC2 instances only on push to main (not on PRs)
+    - name: Deploy Backend to EC2
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      env:
+        ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+        ECR_REPOSITORY: image-editor-backend
+      run: |
+        # Get Backend EC2 instance IDs
+        BACKEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ -z "$BACKEND_INSTANCES" ]; then
+          echo "No running backend instances found"
+          exit 0
+        fi
+        
+        echo "Deploying to backend instances: $BACKEND_INSTANCES"
+        
+        # Send command to update and restart backend service
+        aws ssm send-command \
+          --instance-ids $BACKEND_INSTANCES \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=[
+            "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin '$ECR_REGISTRY'",
+            "docker pull '$ECR_REGISTRY'/'$ECR_REPOSITORY':latest",
+            "systemctl restart backend",
+            "sleep 5",
+            "systemctl status backend"
+          ]' \
+          --comment "Deploy backend from GitHub Actions" \
+          --output json
+
+    - name: Deploy Frontend to EC2
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      env:
+        ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+        ECR_REPOSITORY: image-editor-frontend
+      run: |
+        # Get Frontend EC2 instance IDs
+        FRONTEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ -z "$FRONTEND_INSTANCES" ]; then
+          echo "No running frontend instances found"
+          exit 0
+        fi
+        
+        echo "Deploying to frontend instances: $FRONTEND_INSTANCES"
+        
+        # Send command to update and restart frontend service
+        aws ssm send-command \
+          --instance-ids $FRONTEND_INSTANCES \
+          --document-name "AWS-RunShellScript" \
+          --parameters 'commands=[
+            "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin '$ECR_REGISTRY'",
+            "docker pull '$ECR_REGISTRY'/'$ECR_REPOSITORY':latest",
+            "systemctl restart frontend",
+            "sleep 5",
+            "systemctl status frontend"
+          ]' \
+          --comment "Deploy frontend from GitHub Actions" \
+          --output json
+
+    - name: Wait for deployments to complete
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        echo "Waiting 30 seconds for deployments to complete..."
+        sleep 30
+        
+        # Check backend instances health
+        BACKEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ ! -z "$BACKEND_INSTANCES" ]; then
+          echo "Checking backend deployment status..."
+          for instance in $BACKEND_INSTANCES; do
+            echo "Instance $instance status:"
+            aws ssm send-command \
+              --instance-ids $instance \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=["systemctl is-active backend"]' \
+              --output text
+          done
+        fi
+        
+        # Check frontend instances health
+        FRONTEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ ! -z "$FRONTEND_INSTANCES" ]; then
+          echo "Checking frontend deployment status..."
+          for instance in $FRONTEND_INSTANCES; do
+            echo "Instance $instance status:"
+            aws ssm send-command \
+              --instance-ids $instance \
+              --document-name "AWS-RunShellScript" \
+              --parameters 'commands=["systemctl is-active frontend"]' \
+              --output text
+          done
+        fi
