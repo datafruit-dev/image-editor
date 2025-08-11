@@ -1,0 +1,245 @@
+name: Deploy to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      component:
+        description: 'Component to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - backend
+          - frontend
+          - both
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+  EKS_CLUSTER_NAME: image-editor-cluster  # Update this with your actual cluster name
+
+jobs:
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      image-tag: ${{ steps.image.outputs.tag }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set image tag
+      id: image
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          echo "tag=pr-${{ github.event.pull_request.number }}-${{ github.sha }}" >> $GITHUB_OUTPUT
+        else
+          echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Build, tag, and push backend image to Amazon ECR
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event.inputs.component == '' }}
+      env:
+        ECR_REPOSITORY: image-editor-backend
+        IMAGE_TAG: ${{ steps.image.outputs.tag }}
+      run: |
+        cd backend
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        
+        # Only push latest tag on main branch
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        fi
+
+    - name: Build, tag, and push frontend image to Amazon ECR
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event.inputs.component == '' }}
+      env:
+        ECR_REPOSITORY: image-editor-frontend
+        IMAGE_TAG: ${{ steps.image.outputs.tag }}
+      run: |
+        cd frontend
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+        
+        # Only push latest tag on main branch
+        if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        fi
+
+  deploy-to-eks:
+    name: Deploy to EKS
+    needs: build-and-push
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Only deploy on push to main or manual trigger
+    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Install kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'v1.28.0'
+
+    - name: Install kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    - name: Deploy Backend to EKS
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event.inputs.component == '' }}
+      env:
+        IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+      run: |
+        echo "🚀 Deploying backend to EKS..."
+        
+        # Update the image tag in kustomization
+        cd k8s
+        kustomize edit set image 642375200181.dkr.ecr.us-east-1.amazonaws.com/image-editor-backend:$IMAGE_TAG
+        
+        # Apply only backend resources
+        kubectl apply -f namespace.yaml
+        kubectl apply -f backend-deployment.yaml
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/image-editor-backend -n image-editor --timeout=5m
+        
+        # Verify deployment
+        kubectl get pods -n image-editor -l component=backend
+        kubectl get svc -n image-editor -l component=backend
+
+    - name: Deploy Frontend to EKS
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event.inputs.component == '' }}
+      env:
+        IMAGE_TAG: ${{ needs.build-and-push.outputs.image-tag }}
+      run: |
+        echo "🚀 Deploying frontend to EKS..."
+        
+        # Update the image tag in kustomization
+        cd k8s
+        kustomize edit set image 642375200181.dkr.ecr.us-east-1.amazonaws.com/image-editor-frontend:$IMAGE_TAG
+        
+        # Apply only frontend resources
+        kubectl apply -f namespace.yaml
+        kubectl apply -f frontend-deployment.yaml
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/image-editor-frontend -n image-editor --timeout=5m
+        
+        # Verify deployment
+        kubectl get pods -n image-editor -l component=frontend
+        kubectl get svc -n image-editor -l component=frontend
+
+    - name: Deploy Ingress and HPA
+      if: ${{ github.event.inputs.component == 'both' || github.event.inputs.component == '' }}
+      run: |
+        echo "📦 Deploying Ingress and HPA..."
+        
+        cd k8s
+        kubectl apply -f ingress.yaml
+        kubectl apply -f hpa.yaml
+        
+        # Get ingress information
+        echo "🔍 Ingress status:"
+        kubectl get ingress -n image-editor
+        
+        # Get ALB DNS name (may take a few minutes to provision)
+        sleep 30
+        ALB_DNS=$(kubectl get ingress image-editor-ingress -n image-editor -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+        
+        if [ ! -z "$ALB_DNS" ]; then
+          echo "✅ Application will be available at: http://$ALB_DNS"
+        else
+          echo "⏳ ALB is still provisioning. Check ingress status in a few minutes."
+        fi
+
+    - name: Verify Deployment
+      if: always()
+      run: |
+        echo "🔍 Verifying deployment status..."
+        
+        # Check namespace resources
+        echo "=== Namespace Resources ==="
+        kubectl get all -n image-editor
+        
+        # Check pod status
+        echo "=== Pod Status ==="
+        kubectl get pods -n image-editor -o wide
+        
+        # Check service endpoints
+        echo "=== Service Endpoints ==="
+        kubectl get endpoints -n image-editor
+        
+        # Check HPA status
+        echo "=== HPA Status ==="
+        kubectl get hpa -n image-editor
+        
+        # Check recent events
+        echo "=== Recent Events ==="
+        kubectl get events -n image-editor --sort-by='.lastTimestamp' | tail -20
+
+    - name: Rollback on Failure
+      if: failure() && (github.ref == 'refs/heads/main')
+      run: |
+        echo "❌ Deployment failed, initiating rollback..."
+        
+        if [[ "${{ github.event.inputs.component }}" == "backend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]]; then
+          kubectl rollout undo deployment/image-editor-backend -n image-editor
+          kubectl rollout status deployment/image-editor-backend -n image-editor --timeout=5m
+        fi
+        
+        if [[ "${{ github.event.inputs.component }}" == "frontend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]]; then
+          kubectl rollout undo deployment/image-editor-frontend -n image-editor
+          kubectl rollout status deployment/image-editor-frontend -n image-editor --timeout=5m
+        fi
+        
+        echo "✅ Rollback completed"
+
+    - name: Send Deployment Notification
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ EKS Deployment successful!"
+          echo "Image Tag: ${{ needs.build-and-push.outputs.image-tag }}"
+        else
+          echo "❌ EKS Deployment failed!"
+        fi
