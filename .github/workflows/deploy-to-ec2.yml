@@ -1,0 +1,260 @@
+name: Deploy to EC2 Instances
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      component:
+        description: 'Component to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - backend
+          - frontend
+          - both
+  workflow_run:
+    workflows: ["Deploy to ECR and EC2"]
+    types:
+      - completed
+    branches: [main]
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+
+jobs:
+  deploy:
+    name: Deploy to EC2
+    runs-on: ubuntu-latest
+    # Only run if triggered manually or if the ECR deployment was successful
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Deploy Backend
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event_name == 'workflow_run' }}
+      run: |
+        echo "🚀 Deploying backend to EC2 instances..."
+        
+        # Get Backend EC2 instance IDs
+        BACKEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ -z "$BACKEND_INSTANCES" ]; then
+          echo "❌ No running backend instances found"
+          exit 1
+        fi
+        
+        echo "📦 Found backend instances: $BACKEND_INSTANCES"
+        
+        # Create deployment script
+        DEPLOYMENT_SCRIPT=$(cat <<'EOF'
+        #!/bin/bash
+        set -e
+        
+        echo "Starting backend deployment..."
+        
+        # Login to ECR
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_REGISTRY
+        
+        # Pull the latest image
+        echo "Pulling latest backend image..."
+        docker pull $ECR_REGISTRY/image-editor-backend:latest
+        
+        # Stop the current container gracefully
+        echo "Stopping current backend container..."
+        systemctl stop backend || true
+        
+        # Remove old containers and images
+        docker container prune -f
+        docker image prune -f
+        
+        # Start the new container
+        echo "Starting new backend container..."
+        systemctl start backend
+        
+        # Wait for service to be healthy
+        sleep 10
+        
+        # Check service status
+        if systemctl is-active --quiet backend; then
+          echo "✅ Backend service is running"
+          docker ps | grep backend
+        else
+          echo "❌ Backend service failed to start"
+          systemctl status backend
+          exit 1
+        fi
+        EOF
+        )
+        
+        # Deploy to each instance
+        for INSTANCE_ID in $BACKEND_INSTANCES; do
+          echo "Deploying to instance: $INSTANCE_ID"
+          
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"export ECR_REGISTRY=${{ env.ECR_REGISTRY }}\",\"$DEPLOYMENT_SCRIPT\"]" \
+            --comment "Backend deployment from GitHub Actions" \
+            --query "Command.CommandId" \
+            --output text)
+          
+          echo "Command ID: $COMMAND_ID"
+          
+          # Wait for command to complete (timeout after 2 minutes)
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            || echo "Warning: Command execution timeout"
+          
+          # Get command result
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" \
+            --output text
+        done
+
+    - name: Deploy Frontend
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event_name == 'workflow_run' }}
+      run: |
+        echo "🚀 Deploying frontend to EC2 instances..."
+        
+        # Get Frontend EC2 instance IDs
+        FRONTEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ -z "$FRONTEND_INSTANCES" ]; then
+          echo "❌ No running frontend instances found"
+          exit 1
+        fi
+        
+        echo "📦 Found frontend instances: $FRONTEND_INSTANCES"
+        
+        # Create deployment script
+        DEPLOYMENT_SCRIPT=$(cat <<'EOF'
+        #!/bin/bash
+        set -e
+        
+        echo "Starting frontend deployment..."
+        
+        # Login to ECR
+        aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin $ECR_REGISTRY
+        
+        # Pull the latest image
+        echo "Pulling latest frontend image..."
+        docker pull $ECR_REGISTRY/image-editor-frontend:latest
+        
+        # Stop the current container gracefully
+        echo "Stopping current frontend container..."
+        systemctl stop frontend || true
+        
+        # Remove old containers and images
+        docker container prune -f
+        docker image prune -f
+        
+        # Start the new container
+        echo "Starting new frontend container..."
+        systemctl start frontend
+        
+        # Wait for service to be healthy
+        sleep 10
+        
+        # Check service status
+        if systemctl is-active --quiet frontend; then
+          echo "✅ Frontend service is running"
+          docker ps | grep frontend
+        else
+          echo "❌ Frontend service failed to start"
+          systemctl status frontend
+          exit 1
+        fi
+        EOF
+        )
+        
+        # Deploy to each instance
+        for INSTANCE_ID in $FRONTEND_INSTANCES; do
+          echo "Deploying to instance: $INSTANCE_ID"
+          
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[\"export ECR_REGISTRY=${{ env.ECR_REGISTRY }}\",\"$DEPLOYMENT_SCRIPT\"]" \
+            --comment "Frontend deployment from GitHub Actions" \
+            --query "Command.CommandId" \
+            --output text)
+          
+          echo "Command ID: $COMMAND_ID"
+          
+          # Wait for command to complete (timeout after 2 minutes)
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            || echo "Warning: Command execution timeout"
+          
+          # Get command result
+          aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" \
+            --output text
+        done
+
+    - name: Verify Deployment
+      if: always()
+      run: |
+        echo "🔍 Verifying deployment status..."
+        
+        # Check backend health
+        if [[ "${{ github.event.inputs.component }}" == "backend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]] || [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+          echo "Checking backend instances..."
+          BACKEND_INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=image-editor-backend-*" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress]" \
+            --output text)
+          echo "$BACKEND_INSTANCES"
+        fi
+        
+        # Check frontend health
+        if [[ "${{ github.event.inputs.component }}" == "frontend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]] || [[ "${{ github.event_name }}" == "workflow_run" ]]; then
+          echo "Checking frontend instances..."
+          FRONTEND_INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+                      "Name=instance-state-name,Values=running" \
+            --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress]" \
+            --output text)
+          echo "$FRONTEND_INSTANCES"
+        fi
+        
+        echo "✅ Deployment verification complete"
+
+    - name: Send Deployment Notification
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ Deployment successful!"
+        else
+          echo "❌ Deployment failed!"
+        fi
