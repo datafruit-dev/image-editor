@@ -1,4 +1,9 @@
 name: Deploy to ECR
+# NOTE: This workflow only pushes images to ECR but does not deploy to EC2 instances.
+# For full deployment including EC2 updates, use deploy-to-ec2.yml instead.
+# This workflow is kept for backward compatibility or if you only want to push images
+# without triggering deployments.
+
 
 on:
   push:
