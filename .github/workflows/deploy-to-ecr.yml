@@ -31,7 +31,7 @@ jobs:
 
     - name: Build, tag, and push backend image to Amazon ECR
       env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
         ECR_REPOSITORY: image-editor-backend
         IMAGE_TAG: ${{ github.sha }}
       run: |
@@ -43,7 +43,7 @@ jobs:
 
     - name: Build, tag, and push frontend image to Amazon ECR
       env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
         ECR_REPOSITORY: image-editor-frontend
         IMAGE_TAG: ${{ github.sha }}
       run: |
