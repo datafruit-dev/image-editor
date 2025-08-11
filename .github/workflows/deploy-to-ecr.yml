@@ -62,7 +62,7 @@ jobs:
       run: |
         # Get Backend EC2 instance IDs
         BACKEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+          --filters "Name=tag:Name,Values=image-editor-backend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
