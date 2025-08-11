@@ -1,4 +1,4 @@
-name: Deploy to EC2 Instances
+name: Deploy to EC2 Instances cx
 
 on:
   workflow_dispatch:
