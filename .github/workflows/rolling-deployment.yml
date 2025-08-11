@@ -40,7 +40,7 @@ jobs:
         
         # Get all backend instances
         BACKEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+          --filters "Name=tag:Name,Values=image-editor-backend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
@@ -125,7 +125,7 @@ jobs:
         
         # Get all frontend instances
         FRONTEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+          --filters "Name=tag:Name,Values=image-editor-frontend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
@@ -204,7 +204,7 @@ jobs:
         
         # Check backend instances
         BACKEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+          --filters "Name=tag:Name,Values=image-editor-backend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
@@ -220,7 +220,7 @@ jobs:
         
         # Check frontend instances
         FRONTEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+          --filters "Name=tag:Name,Values=image-editor-frontend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
