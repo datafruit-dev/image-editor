@@ -1,0 +1,313 @@
+name: Deploy to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      component:
+        description: 'Component to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - backend
+          - frontend
+          - both
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/deploy-to-eks.yml'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+  EKS_CLUSTER_NAME: image-editor-cluster
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      backend-tag: ${{ steps.backend-meta.outputs.tags }}
+      frontend-tag: ${{ steps.frontend-meta.outputs.tags }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # Build and push Backend
+    - name: Generate backend metadata
+      id: backend-meta
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.ECR_REGISTRY }}/image-editor-backend
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push backend Docker image
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      uses: docker/build-push-action@v5
+      with:
+        context: ./backend
+        push: true
+        tags: ${{ steps.backend-meta.outputs.tags }}
+        labels: ${{ steps.backend-meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    # Build and push Frontend
+    - name: Generate frontend metadata
+      id: frontend-meta
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.ECR_REGISTRY }}/image-editor-frontend
+        tags: |
+          type=ref,event=branch
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push frontend Docker image
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      uses: docker/build-push-action@v5
+      with:
+        context: ./frontend
+        push: true
+        tags: ${{ steps.frontend-meta.outputs.tags }}
+        labels: ${{ steps.frontend-meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  deploy-to-eks:
+    name: Deploy to EKS
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    needs: build-and-push
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Deploy Backend to Kubernetes
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      run: |
+        echo "🚀 Deploying backend to EKS..."
+        
+        # Apply the backend deployment
+        kubectl apply -f - <<EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: backend
+          namespace: image-editor
+          labels:
+            app: backend
+            component: api
+        spec:
+          replicas: 2
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 1
+              maxUnavailable: 0
+          selector:
+            matchLabels:
+              app: backend
+          template:
+            metadata:
+              labels:
+                app: backend
+                component: api
+              annotations:
+                deployment.kubernetes.io/revision: "$(date +%s)"
+            spec:
+              containers:
+              - name: backend
+                image: ${{ env.ECR_REGISTRY }}/image-editor-backend:latest
+                imagePullPolicy: Always
+                ports:
+                - containerPort: 8080
+                  protocol: TCP
+                resources:
+                  requests:
+                    memory: "256Mi"
+                    cpu: "250m"
+                  limits:
+                    memory: "512Mi"
+                    cpu: "500m"
+                livenessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8080
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  failureThreshold: 3
+                readinessProbe:
+                  httpGet:
+                    path: /health
+                    port: 8080
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+                  timeoutSeconds: 3
+                  failureThreshold: 3
+                env:
+                - name: PORT
+                  value: "8080"
+        EOF
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/backend -n image-editor --timeout=5m
+        
+        echo "✅ Backend deployment complete"
+
+    - name: Deploy Frontend to Kubernetes
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      run: |
+        echo "🚀 Deploying frontend to EKS..."
+        
+        # Apply the frontend deployment
+        kubectl apply -f - <<EOF
+        apiVersion: apps/v1
+        kind: Deployment
+        metadata:
+          name: frontend
+          namespace: image-editor
+          labels:
+            app: frontend
+            component: web
+        spec:
+          replicas: 2
+          strategy:
+            type: RollingUpdate
+            rollingUpdate:
+              maxSurge: 1
+              maxUnavailable: 0
+          selector:
+            matchLabels:
+              app: frontend
+          template:
+            metadata:
+              labels:
+                app: frontend
+                component: web
+              annotations:
+                deployment.kubernetes.io/revision: "$(date +%s)"
+            spec:
+              containers:
+              - name: frontend
+                image: ${{ env.ECR_REGISTRY }}/image-editor-frontend:latest
+                imagePullPolicy: Always
+                ports:
+                - containerPort: 3000
+                  protocol: TCP
+                resources:
+                  requests:
+                    memory: "256Mi"
+                    cpu: "250m"
+                  limits:
+                    memory: "512Mi"
+                    cpu: "500m"
+                livenessProbe:
+                  httpGet:
+                    path: /
+                    port: 3000
+                  initialDelaySeconds: 30
+                  periodSeconds: 10
+                  timeoutSeconds: 5
+                  failureThreshold: 3
+                readinessProbe:
+                  httpGet:
+                    path: /
+                    port: 3000
+                  initialDelaySeconds: 10
+                  periodSeconds: 5
+                  timeoutSeconds: 3
+                  failureThreshold: 3
+                env:
+                - name: BACKEND_URL
+                  value: "http://backend.image-editor.svc.cluster.local:8080"
+                - name: PORT
+                  value: "3000"
+        EOF
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/frontend -n image-editor --timeout=5m
+        
+        echo "✅ Frontend deployment complete"
+
+    - name: Verify Deployment
+      if: always()
+      run: |
+        echo "🔍 Verifying deployment status..."
+        
+        # Check namespace
+        kubectl get namespace image-editor
+        
+        # Check deployments
+        kubectl get deployments -n image-editor
+        
+        # Check pods
+        kubectl get pods -n image-editor
+        
+        # Check services
+        kubectl get services -n image-editor
+        
+        # Check ingress
+        kubectl get ingress -n image-editor
+        
+        # Get ALB URL if ingress exists
+        ALB_URL=$(kubectl get ingress -n image-editor image-editor-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "Ingress not ready")
+        
+        if [ "$ALB_URL" != "Ingress not ready" ] && [ -n "$ALB_URL" ]; then
+          echo "🌐 Application URL: http://$ALB_URL"
+        else
+          echo "⏳ Ingress/ALB is still being provisioned"
+        fi
+        
+        echo "✅ Deployment verification complete"
+
+    - name: Send Deployment Notification
+      if: always()
+      run: |
+        if [ "${{ job.status }}" == "success" ]; then
+          echo "✅ EKS Deployment successful!"
+        else
+          echo "❌ EKS Deployment failed!"
+        fi
