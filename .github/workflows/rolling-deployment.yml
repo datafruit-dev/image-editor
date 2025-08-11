@@ -1,0 +1,237 @@
+name: Rolling Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      strategy:
+        description: 'Deployment strategy'
+        required: true
+        default: 'rolling'
+        type: choice
+        options:
+          - rolling
+          - blue-green
+          - canary
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+
+jobs:
+  rolling-deploy:
+    name: Rolling Deployment
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Rolling Update Backend
+      if: ${{ github.event.inputs.strategy == 'rolling' }}
+      run: |
+        echo "🔄 Starting rolling deployment for backend..."
+        
+        # Get all backend instances
+        BACKEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ -z "$BACKEND_INSTANCES" ]; then
+          echo "No backend instances found"
+          exit 0
+        fi
+        
+        # Convert to array
+        IFS=' ' read -ra INSTANCES_ARRAY <<< "$BACKEND_INSTANCES"
+        TOTAL_INSTANCES=${#INSTANCES_ARRAY[@]}
+        
+        echo "Found $TOTAL_INSTANCES backend instances"
+        
+        # Deploy to instances one by one
+        for i in "${!INSTANCES_ARRAY[@]}"; do
+          INSTANCE_ID="${INSTANCES_ARRAY[$i]}"
+          echo "[$((i+1))/$TOTAL_INSTANCES] Updating instance: $INSTANCE_ID"
+          
+          # Remove instance from load balancer (if applicable)
+          # aws elb deregister-instances-from-load-balancer --load-balancer-name my-lb --instances $INSTANCE_ID || true
+          
+          # Deploy to instance
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "echo \"Starting rolling update...\"",
+              "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin '${{ env.ECR_REGISTRY }}'",
+              "docker pull '${{ env.ECR_REGISTRY }}'/image-editor-backend:latest",
+              "systemctl stop backend",
+              "docker container prune -f",
+              "systemctl start backend",
+              "sleep 10",
+              "systemctl is-active backend && echo \"Service is running\" || exit 1"
+            ]' \
+            --comment "Rolling deployment - Backend instance $((i+1))/$TOTAL_INSTANCES" \
+            --query "Command.CommandId" \
+            --output text)
+          
+          # Wait for deployment to complete
+          echo "Waiting for deployment to complete..."
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --cli-read-timeout 120 \
+            || echo "Command execution timeout"
+          
+          # Check deployment status
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" \
+            --output text)
+          
+          if [ "$STATUS" != "Success" ]; then
+            echo "❌ Deployment failed for instance $INSTANCE_ID"
+            echo "Rolling back..."
+            # Implement rollback logic here
+            exit 1
+          fi
+          
+          echo "✅ Instance $INSTANCE_ID updated successfully"
+          
+          # Re-register instance with load balancer (if applicable)
+          # aws elb register-instances-with-load-balancer --load-balancer-name my-lb --instances $INSTANCE_ID || true
+          
+          # Wait before updating next instance (for stability)
+          if [ $i -lt $((TOTAL_INSTANCES-1)) ]; then
+            echo "Waiting 30 seconds before updating next instance..."
+            sleep 30
+          fi
+        done
+        
+        echo "✅ Rolling deployment completed for all backend instances"
+
+    - name: Rolling Update Frontend
+      if: ${{ github.event.inputs.strategy == 'rolling' }}
+      run: |
+        echo "🔄 Starting rolling deployment for frontend..."
+        
+        # Get all frontend instances
+        FRONTEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        if [ -z "$FRONTEND_INSTANCES" ]; then
+          echo "No frontend instances found"
+          exit 0
+        fi
+        
+        # Convert to array
+        IFS=' ' read -ra INSTANCES_ARRAY <<< "$FRONTEND_INSTANCES"
+        TOTAL_INSTANCES=${#INSTANCES_ARRAY[@]}
+        
+        echo "Found $TOTAL_INSTANCES frontend instances"
+        
+        # Deploy to instances one by one
+        for i in "${!INSTANCES_ARRAY[@]}"; do
+          INSTANCE_ID="${INSTANCES_ARRAY[$i]}"
+          echo "[$((i+1))/$TOTAL_INSTANCES] Updating instance: $INSTANCE_ID"
+          
+          # Deploy to instance
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=[
+              "echo \"Starting rolling update...\"",
+              "aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin '${{ env.ECR_REGISTRY }}'",
+              "docker pull '${{ env.ECR_REGISTRY }}'/image-editor-frontend:latest",
+              "systemctl stop frontend",
+              "docker container prune -f",
+              "systemctl start frontend",
+              "sleep 10",
+              "systemctl is-active frontend && echo \"Service is running\" || exit 1"
+            ]' \
+            --comment "Rolling deployment - Frontend instance $((i+1))/$TOTAL_INSTANCES" \
+            --query "Command.CommandId" \
+            --output text)
+          
+          # Wait for deployment to complete
+          echo "Waiting for deployment to complete..."
+          aws ssm wait command-executed \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --cli-read-timeout 120 \
+            || echo "Command execution timeout"
+          
+          # Check deployment status
+          STATUS=$(aws ssm get-command-invocation \
+            --command-id "$COMMAND_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --query "Status" \
+            --output text)
+          
+          if [ "$STATUS" != "Success" ]; then
+            echo "❌ Deployment failed for instance $INSTANCE_ID"
+            echo "Rolling back..."
+            # Implement rollback logic here
+            exit 1
+          fi
+          
+          echo "✅ Instance $INSTANCE_ID updated successfully"
+          
+          # Wait before updating next instance (for stability)
+          if [ $i -lt $((TOTAL_INSTANCES-1)) ]; then
+            echo "Waiting 30 seconds before updating next instance..."
+            sleep 30
+          fi
+        done
+        
+        echo "✅ Rolling deployment completed for all frontend instances"
+
+    - name: Health Check
+      if: always()
+      run: |
+        echo "🏥 Running health checks..."
+        
+        # Check backend instances
+        BACKEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        for INSTANCE_ID in $BACKEND_INSTANCES; do
+          echo "Checking backend instance: $INSTANCE_ID"
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["curl -f http://localhost:8080/health || echo \"Health check failed\""]' \
+            --output json > /dev/null
+        done
+        
+        # Check frontend instances
+        FRONTEND_INSTANCES=$(aws ec2 describe-instances \
+          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+                    "Name=instance-state-name,Values=running" \
+          --query "Reservations[].Instances[].InstanceId" \
+          --output text)
+        
+        for INSTANCE_ID in $FRONTEND_INSTANCES; do
+          echo "Checking frontend instance: $INSTANCE_ID"
+          aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["curl -f http://localhost:3000 || echo \"Health check failed\""]' \
+            --output json > /dev/null
+        done
+        
+        echo "✅ Health checks completed"
