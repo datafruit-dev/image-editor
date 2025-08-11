@@ -1,4 +1,4 @@
-name: Deploy to ECR and EC2
+name: Deploy to ECR and EC2 oohj
 
 on:
   push:
