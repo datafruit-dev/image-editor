@@ -52,7 +52,7 @@ jobs:
         
         # Get Backend EC2 instance IDs
         BACKEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+          --filters "Name=tag:Name,Values=image-editor-backend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
@@ -140,7 +140,7 @@ jobs:
         
         # Get Frontend EC2 instance IDs
         FRONTEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+          --filters "Name=tag:Name,Values=image-editor-frontend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
@@ -230,7 +230,7 @@ jobs:
         if [[ "${{ github.event.inputs.component }}" == "backend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]] || [[ "${{ github.event_name }}" == "workflow_run" ]]; then
           echo "Checking backend instances..."
           BACKEND_INSTANCES=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=image-editor-backend-*" \
+            --filters "Name=tag:Name,Values=image-editor-backend" \
                       "Name=instance-state-name,Values=running" \
             --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress]" \
             --output text)
@@ -241,7 +241,7 @@ jobs:
         if [[ "${{ github.event.inputs.component }}" == "frontend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]] || [[ "${{ github.event_name }}" == "workflow_run" ]]; then
           echo "Checking frontend instances..."
           FRONTEND_INSTANCES=$(aws ec2 describe-instances \
-            --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+            --filters "Name=tag:Name,Values=image-editor-frontend" \
                       "Name=instance-state-name,Values=running" \
             --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress]" \
             --output text)
