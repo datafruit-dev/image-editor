@@ -96,7 +96,7 @@ jobs:
       run: |
         # Get Frontend EC2 instance IDs
         FRONTEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-frontend-*" \
+          --filters "Name=tag:Name,Values=image-editor-frontend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
@@ -130,7 +130,7 @@ jobs:
         
         # Check backend instances health
         BACKEND_INSTANCES=$(aws ec2 describe-instances \
-          --filters "Name=tag:Name,Values=image-editor-backend-*" \
+          --filters "Name=tag:Name,Values=image-editor-backend" \
                     "Name=instance-state-name,Values=running" \
           --query "Reservations[].Instances[].InstanceId" \
           --output text)
