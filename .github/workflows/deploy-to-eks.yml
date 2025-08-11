@@ -1,0 +1,219 @@
+---
+name: Deploy to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      component:
+        description: 'Component to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - backend
+          - frontend
+          - both
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/deploy-to-eks.yml'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+  EKS_CLUSTER_NAME: image-editor-cluster
+
+jobs:
+  build-and-push:
+    name: Build and Push Docker Images
+    runs-on: ubuntu-latest
+    outputs:
+      backend-image-tag: ${{ steps.backend-meta.outputs.tags }}
+      frontend-image-tag: ${{ steps.frontend-meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build and push Backend
+      - name: Generate Backend metadata
+        id: backend-meta
+        if: >-
+          ${{ github.event.inputs.component == 'backend' ||
+          github.event.inputs.component == 'both' ||
+          github.event_name == 'push' }}
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/image-editor-backend
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Backend Docker image
+        if: >-
+          ${{ github.event.inputs.component == 'backend' ||
+          github.event.inputs.component == 'both' ||
+          github.event_name == 'push' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          push: true
+          tags: ${{ steps.backend-meta.outputs.tags }}
+          labels: ${{ steps.backend-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Build and push Frontend
+      - name: Generate Frontend metadata
+        id: frontend-meta
+        if: >-
+          ${{ github.event.inputs.component == 'frontend' ||
+          github.event.inputs.component == 'both' ||
+          github.event_name == 'push' }}
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/image-editor-frontend
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Frontend Docker image
+        if: >-
+          ${{ github.event.inputs.component == 'frontend' ||
+          github.event.inputs.component == 'both' ||
+          github.event_name == 'push' }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          push: true
+          tags: ${{ steps.frontend-meta.outputs.tags }}
+          labels: ${{ steps.frontend-meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://backend:8080
+
+  deploy-to-eks:
+    name: Deploy to EKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ env.AWS_REGION }} \
+            --name ${{ env.EKS_CLUSTER_NAME }}
+
+      - name: Check Kubernetes connection
+        run: |
+          kubectl version --client
+          kubectl get nodes
+
+      - name: Deploy Backend to EKS
+        if: >-
+          ${{ github.event.inputs.component == 'backend' ||
+          github.event.inputs.component == 'both' ||
+          github.event_name == 'push' }}
+        run: |
+          echo "🚀 Deploying backend to EKS..."
+
+          # Update the image tag in the deployment
+          kubectl set image deployment/image-editor-backend \
+            backend=${{ env.ECR_REGISTRY }}/image-editor-backend:latest \
+            -n image-editor --record
+
+          # Wait for rollout to complete
+          kubectl rollout status deployment/image-editor-backend \
+            -n image-editor --timeout=5m
+
+          # Verify deployment
+          kubectl get pods -n image-editor -l app=image-editor-backend
+
+          echo "✅ Backend deployment complete"
+
+      - name: Deploy Frontend to EKS
+        if: >-
+          ${{ github.event.inputs.component == 'frontend' ||
+          github.event.inputs.component == 'both' ||
+          github.event_name == 'push' }}
+        run: |
+          echo "🚀 Deploying frontend to EKS..."
+
+          # Update the image tag in the deployment
+          kubectl set image deployment/image-editor-frontend \
+            frontend=${{ env.ECR_REGISTRY }}/image-editor-frontend:latest \
+            -n image-editor --record
+
+          # Wait for rollout to complete
+          kubectl rollout status deployment/image-editor-frontend \
+            -n image-editor --timeout=5m
+
+          # Verify deployment
+          kubectl get pods -n image-editor -l app=image-editor-frontend
+
+          echo "✅ Frontend deployment complete"
+
+      - name: Get Load Balancer URL
+        if: always()
+        run: |
+          echo "🔍 Getting Load Balancer URL..."
+          kubectl get ingress -n image-editor image-editor-ingress \
+            -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+          echo ""
+          echo "Application will be available at the above URL once \
+          DNS propagation is complete."
+
+      - name: Deployment Summary
+        if: always()
+        run: |
+          echo "📊 Deployment Summary:"
+          echo "====================="
+          kubectl get deployments -n image-editor
+          echo ""
+          echo "Pods:"
+          kubectl get pods -n image-editor
+          echo ""
+          echo "Services:"
+          kubectl get services -n image-editor
+          echo ""
+          echo "Ingress:"
+          kubectl get ingress -n image-editor
