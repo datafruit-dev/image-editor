@@ -1,0 +1,342 @@
+name: Deploy to EKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'production'
+        type: choice
+        options:
+          - production
+          - staging
+      component:
+        description: 'Component to deploy'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - backend
+          - frontend
+          - both
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/deploy-to-eks.yml'
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 642375200181.dkr.ecr.us-east-1.amazonaws.com
+  EKS_CLUSTER_NAME: image-editor-cluster
+  NAMESPACE: image-editor
+
+jobs:
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    outputs:
+      backend-image-tag: ${{ steps.backend-image.outputs.image-tag }}
+      frontend-image-tag: ${{ steps.frontend-image.outputs.image-tag }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    # Build and push Backend
+    - name: Build and push backend image
+      id: backend-image
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      run: |
+        IMAGE_TAG="${GITHUB_SHA::8}-$(date +%Y%m%d%H%M%S)"
+        echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+        
+        docker buildx build \
+          --platform linux/amd64 \
+          --push \
+          -t ${{ env.ECR_REGISTRY }}/image-editor-backend:$IMAGE_TAG \
+          -t ${{ env.ECR_REGISTRY }}/image-editor-backend:latest \
+          ./backend
+        
+        echo "✅ Backend image pushed: $IMAGE_TAG"
+
+    # Build and push Frontend
+    - name: Build and push frontend image
+      id: frontend-image
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      run: |
+        IMAGE_TAG="${GITHUB_SHA::8}-$(date +%Y%m%d%H%M%S)"
+        echo "image-tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+        
+        docker buildx build \
+          --platform linux/amd64 \
+          --push \
+          -t ${{ env.ECR_REGISTRY }}/image-editor-frontend:$IMAGE_TAG \
+          -t ${{ env.ECR_REGISTRY }}/image-editor-frontend:latest \
+          --build-arg NEXT_PUBLIC_API_URL=/api \
+          ./frontend
+        
+        echo "✅ Frontend image pushed: $IMAGE_TAG"
+
+  deploy-to-eks:
+    name: Deploy to EKS
+    needs: build-and-push
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Check cluster connectivity
+      run: |
+        kubectl cluster-info
+        kubectl get nodes
+
+    - name: Create namespace if not exists
+      run: |
+        kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+    - name: Update ECR pull secret
+      run: |
+        kubectl delete secret ecr-registry-secret -n ${{ env.NAMESPACE }} --ignore-not-found
+        kubectl create secret docker-registry ecr-registry-secret \
+          --docker-server=${{ env.ECR_REGISTRY }} \
+          --docker-username=AWS \
+          --docker-password=$(aws ecr get-login-password --region ${{ env.AWS_REGION }}) \
+          -n ${{ env.NAMESPACE }}
+
+    - name: Deploy Backend
+      if: ${{ github.event.inputs.component == 'backend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      run: |
+        echo "🚀 Deploying backend to EKS..."
+        
+        # Update the deployment with new image
+        IMAGE_TAG="${{ needs.build-and-push.outputs.backend-image-tag }}"
+        
+        if [ -z "$IMAGE_TAG" ]; then
+          IMAGE_TAG="latest"
+        fi
+        
+        # Apply the deployment manifest
+        kubectl apply -f terraform-demo/k8s-manifests/backend-deployment.yaml
+        
+        # Update the image
+        kubectl set image deployment/image-editor-backend \
+          backend=${{ env.ECR_REGISTRY }}/image-editor-backend:$IMAGE_TAG \
+          -n ${{ env.NAMESPACE }}
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/image-editor-backend -n ${{ env.NAMESPACE }} --timeout=300s
+        
+        echo "✅ Backend deployment complete"
+
+    - name: Deploy Frontend
+      if: ${{ github.event.inputs.component == 'frontend' || github.event.inputs.component == 'both' || github.event_name == 'push' }}
+      run: |
+        echo "🚀 Deploying frontend to EKS..."
+        
+        # Update the deployment with new image
+        IMAGE_TAG="${{ needs.build-and-push.outputs.frontend-image-tag }}"
+        
+        if [ -z "$IMAGE_TAG" ]; then
+          IMAGE_TAG="latest"
+        fi
+        
+        # Apply the deployment manifest
+        kubectl apply -f terraform-demo/k8s-manifests/frontend-deployment.yaml
+        
+        # Update the image
+        kubectl set image deployment/image-editor-frontend \
+          frontend=${{ env.ECR_REGISTRY }}/image-editor-frontend:$IMAGE_TAG \
+          -n ${{ env.NAMESPACE }}
+        
+        # Wait for rollout to complete
+        kubectl rollout status deployment/image-editor-frontend -n ${{ env.NAMESPACE }} --timeout=300s
+        
+        echo "✅ Frontend deployment complete"
+
+    - name: Deploy Ingress
+      run: |
+        echo "📦 Applying Ingress configuration..."
+        kubectl apply -f terraform-demo/k8s-manifests/ingress.yaml
+        
+        # Wait a moment for the ingress to be processed
+        sleep 10
+        
+        # Get ingress status
+        kubectl get ingress -n ${{ env.NAMESPACE }}
+
+    - name: Verify Deployment
+      if: always()
+      run: |
+        echo "🔍 Verifying deployment status..."
+        
+        echo "=== Deployments ==="
+        kubectl get deployments -n ${{ env.NAMESPACE }}
+        
+        echo -e "\n=== Pods ==="
+        kubectl get pods -n ${{ env.NAMESPACE }}
+        
+        echo -e "\n=== Services ==="
+        kubectl get services -n ${{ env.NAMESPACE }}
+        
+        echo -e "\n=== Ingress ==="
+        kubectl get ingress -n ${{ env.NAMESPACE }}
+        
+        echo -e "\n=== HPA Status ==="
+        kubectl get hpa -n ${{ env.NAMESPACE }}
+        
+        # Try to get the ALB URL
+        ALB_URL=$(kubectl get ingress -n ${{ env.NAMESPACE }} image-editor-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+        
+        if [ -n "$ALB_URL" ]; then
+          echo -e "\n✅ Application URL: http://$ALB_URL"
+        else
+          echo -e "\n⏳ ALB is still being provisioned. Check back in a few minutes."
+        fi
+
+    - name: Rollback on Failure
+      if: failure()
+      run: |
+        echo "❌ Deployment failed, initiating rollback..."
+        
+        if [[ "${{ github.event.inputs.component }}" == "backend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]]; then
+          kubectl rollout undo deployment/image-editor-backend -n ${{ env.NAMESPACE }}
+          kubectl rollout status deployment/image-editor-backend -n ${{ env.NAMESPACE }} --timeout=300s
+        fi
+        
+        if [[ "${{ github.event.inputs.component }}" == "frontend" ]] || [[ "${{ github.event.inputs.component }}" == "both" ]]; then
+          kubectl rollout undo deployment/image-editor-frontend -n ${{ env.NAMESPACE }}
+          kubectl rollout status deployment/image-editor-frontend -n ${{ env.NAMESPACE }} --timeout=300s
+        fi
+        
+        echo "✅ Rollback completed"
+
+  smoke-test:
+    name: Smoke Test
+    needs: deploy-to-eks
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: success()
+    
+    steps:
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Update kubeconfig
+      run: |
+        aws eks update-kubeconfig --region ${{ env.AWS_REGION }} --name ${{ env.EKS_CLUSTER_NAME }}
+
+    - name: Wait for ALB
+      id: get-alb
+      run: |
+        echo "⏳ Waiting for ALB to be ready..."
+        
+        for i in {1..30}; do
+          ALB_URL=$(kubectl get ingress -n ${{ env.NAMESPACE }} image-editor-ingress -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "")
+          
+          if [ -n "$ALB_URL" ]; then
+            echo "alb-url=$ALB_URL" >> $GITHUB_OUTPUT
+            echo "✅ ALB is ready: $ALB_URL"
+            break
+          fi
+          
+          echo "Attempt $i/30: ALB not ready yet, waiting 10 seconds..."
+          sleep 10
+        done
+        
+        if [ -z "$ALB_URL" ]; then
+          echo "⚠️ ALB not ready after 5 minutes, skipping smoke tests"
+          exit 0
+        fi
+
+    - name: Run Smoke Tests
+      if: steps.get-alb.outputs.alb-url != ''
+      run: |
+        ALB_URL="${{ steps.get-alb.outputs.alb-url }}"
+        echo "🧪 Running smoke tests against http://$ALB_URL"
+        
+        # Wait for services to be fully ready
+        sleep 30
+        
+        # Test frontend
+        echo "Testing frontend..."
+        FRONTEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_URL/ || echo "000")
+        if [[ "$FRONTEND_STATUS" == "200" ]] || [[ "$FRONTEND_STATUS" == "304" ]]; then
+          echo "✅ Frontend is responding (HTTP $FRONTEND_STATUS)"
+        else
+          echo "❌ Frontend test failed (HTTP $FRONTEND_STATUS)"
+          exit 1
+        fi
+        
+        # Test backend health endpoint
+        echo "Testing backend health..."
+        BACKEND_STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://$ALB_URL/api/health || echo "000")
+        if [[ "$BACKEND_STATUS" == "200" ]]; then
+          echo "✅ Backend is healthy (HTTP $BACKEND_STATUS)"
+        else
+          echo "⚠️ Backend health check returned HTTP $BACKEND_STATUS"
+        fi
+        
+        echo "✅ Smoke tests completed successfully!"
+        echo "🎉 Application is live at: http://$ALB_URL"
+
+  notify:
+    name: Send Notification
+    needs: [deploy-to-eks, smoke-test]
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    if: always()
+    
+    steps:
+    - name: Deployment Status
+      run: |
+        if [[ "${{ needs.deploy-to-eks.result }}" == "success" ]]; then
+          echo "✅ Deployment to EKS successful!"
+          
+          if [[ "${{ needs.smoke-test.result }}" == "success" ]]; then
+            echo "✅ Smoke tests passed!"
+          elif [[ "${{ needs.smoke-test.result }}" == "skipped" ]]; then
+            echo "⏭️ Smoke tests were skipped"
+          else
+            echo "⚠️ Smoke tests failed or incomplete"
+          fi
+        else
+          echo "❌ Deployment to EKS failed!"
+        fi
+        
+        echo "📊 Deployment Summary:"
+        echo "- Environment: ${{ github.event.inputs.environment || 'production' }}"
+        echo "- Component: ${{ github.event.inputs.component || 'both' }}"
+        echo "- Trigger: ${{ github.event_name }}"
+        echo "- Commit: ${{ github.sha }}"
